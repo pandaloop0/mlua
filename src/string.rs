@@ -1,4 +1,4 @@
-use std::borrow::Borrow;
+use std::borrow::{Borrow, Cow};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::os::raw::{c_int, c_void};
@@ -44,13 +44,7 @@ impl String {
     /// ```
     #[inline]
     pub fn to_str(&self) -> Result<BorrowedStr> {
-        let BorrowedBytes(bytes, guard) = self.as_bytes();
-        let s = str::from_utf8(bytes).map_err(|e| Error::FromLuaConversionError {
-            from: "string",
-            to: "&str".to_string(),
-            message: Some(e.to_string()),
-        })?;
-        Ok(BorrowedStr(s, guard))
+        BorrowedStr::try_from(self)
     }
 
     /// Converts this string to a [`StdString`].
@@ -109,19 +103,21 @@ impl String {
     /// ```
     #[inline]
     pub fn as_bytes(&self) -> BorrowedBytes {
-        let (bytes, guard) = unsafe { self.to_slice() };
-        BorrowedBytes(&bytes[..bytes.len() - 1], guard)
+        BorrowedBytes::from(self)
     }
 
     /// Get the bytes that make up this string, including the trailing nul byte.
     pub fn as_bytes_with_nul(&self) -> BorrowedBytes {
-        let (bytes, guard) = unsafe { self.to_slice() };
-        BorrowedBytes(bytes, guard)
+        let BorrowedBytes { buf, borrow, _guard } = BorrowedBytes::from(self);
+        // Include the trailing nul byte (it's always present but excluded by default)
+        let buf = unsafe { slice::from_raw_parts((*buf).as_ptr(), (*buf).len() + 1) };
+        BorrowedBytes { buf, borrow, _guard }
     }
 
+    // Does not return the terminating nul byte
     unsafe fn to_slice(&self) -> (&[u8], Lua) {
         let lua = self.0.lua.upgrade();
-        let slice = unsafe {
+        let slice = {
             let rawlua = lua.lock();
             let ref_thread = rawlua.ref_thread();
 
@@ -134,7 +130,7 @@ impl String {
             // string type
             let mut size = 0;
             let data = ffi::lua_tolstring(ref_thread, self.0.index, &mut size);
-            slice::from_raw_parts(data as *const u8, size + 1)
+            slice::from_raw_parts(data as *const u8, size)
         };
         (slice, lua)
     }
@@ -238,40 +234,44 @@ impl fmt::Display for Display<'_> {
 }
 
 /// A borrowed string (`&str`) that holds a strong reference to the Lua state.
-pub struct BorrowedStr<'a>(&'a str, #[allow(unused)] Lua);
+pub struct BorrowedStr<'a> {
+    pub(crate) buf: *const str,
+    pub(crate) borrow: Cow<'a, String>,
+    pub(crate) _guard: Lua,
+}
 
 impl Deref for BorrowedStr<'_> {
     type Target = str;
 
     #[inline(always)]
     fn deref(&self) -> &str {
-        self.0
+        unsafe { &*self.buf }
     }
 }
 
 impl Borrow<str> for BorrowedStr<'_> {
     #[inline(always)]
     fn borrow(&self) -> &str {
-        self.0
+        self.deref()
     }
 }
 
 impl AsRef<str> for BorrowedStr<'_> {
     #[inline(always)]
     fn as_ref(&self) -> &str {
-        self.0
+        self.deref()
     }
 }
 
 impl fmt::Display for BorrowedStr<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.0.fmt(f)
+        self.as_ref().fmt(f)
     }
 }
 
 impl fmt::Debug for BorrowedStr<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.0.fmt(f)
+        self.as_ref().fmt(f)
     }
 }
 
@@ -280,7 +280,7 @@ where
     T: AsRef<str>,
 {
     fn eq(&self, other: &T) -> bool {
-        self.0 == other.as_ref()
+        self.as_ref() == other.as_ref()
     }
 }
 
@@ -291,45 +291,64 @@ where
     T: AsRef<str>,
 {
     fn partial_cmp(&self, other: &T) -> Option<cmp::Ordering> {
-        self.0.partial_cmp(other.as_ref())
+        self.as_ref().partial_cmp(other.as_ref())
     }
 }
 
 impl Ord for BorrowedStr<'_> {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
-        self.0.cmp(other.0)
+        self.as_ref().cmp(other.as_ref())
+    }
+}
+
+impl<'a> TryFrom<&'a String> for BorrowedStr<'a> {
+    type Error = Error;
+
+    #[inline]
+    fn try_from(value: &'a String) -> Result<Self> {
+        let BorrowedBytes { buf, borrow, _guard } = BorrowedBytes::from(value);
+        let buf = str::from_utf8(unsafe { &*buf }).map_err(|e| Error::FromLuaConversionError {
+            from: "string",
+            to: "&str".to_string(),
+            message: Some(e.to_string()),
+        })?;
+        Ok(Self { buf, borrow, _guard })
     }
 }
 
 /// A borrowed byte slice (`&[u8]`) that holds a strong reference to the Lua state.
-pub struct BorrowedBytes<'a>(&'a [u8], #[allow(unused)] Lua);
+pub struct BorrowedBytes<'a> {
+    pub(crate) buf: *const [u8],
+    pub(crate) borrow: Cow<'a, String>,
+    pub(crate) _guard: Lua,
+}
 
 impl Deref for BorrowedBytes<'_> {
     type Target = [u8];
 
     #[inline(always)]
     fn deref(&self) -> &[u8] {
-        self.0
+        unsafe { &*self.buf }
     }
 }
 
 impl Borrow<[u8]> for BorrowedBytes<'_> {
     #[inline(always)]
     fn borrow(&self) -> &[u8] {
-        self.0
+        self.deref()
     }
 }
 
 impl AsRef<[u8]> for BorrowedBytes<'_> {
     #[inline(always)]
     fn as_ref(&self) -> &[u8] {
-        self.0
+        self.deref()
     }
 }
 
 impl fmt::Debug for BorrowedBytes<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.0.fmt(f)
+        self.as_ref().fmt(f)
     }
 }
 
@@ -338,7 +357,7 @@ where
     T: AsRef<[u8]>,
 {
     fn eq(&self, other: &T) -> bool {
-        self.0 == other.as_ref()
+        self.as_ref() == other.as_ref()
     }
 }
 
@@ -349,22 +368,31 @@ where
     T: AsRef<[u8]>,
 {
     fn partial_cmp(&self, other: &T) -> Option<cmp::Ordering> {
-        self.0.partial_cmp(other.as_ref())
+        self.as_ref().partial_cmp(other.as_ref())
     }
 }
 
 impl Ord for BorrowedBytes<'_> {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
-        self.0.cmp(other.0)
+        self.as_ref().cmp(other.as_ref())
     }
 }
 
-impl<'a> IntoIterator for BorrowedBytes<'a> {
+impl<'a> IntoIterator for &'a BorrowedBytes<'_> {
     type Item = &'a u8;
     type IntoIter = slice::Iter<'a, u8>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
+        self.iter()
+    }
+}
+
+impl<'a> From<&'a String> for BorrowedBytes<'a> {
+    #[inline]
+    fn from(value: &'a String) -> Self {
+        let (buf, _guard) = unsafe { value.to_slice() };
+        let borrow = Cow::Borrowed(value);
+        Self { buf, borrow, _guard }
     }
 }
 
