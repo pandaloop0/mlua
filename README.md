@@ -1,4 +1,8 @@
 # mlua
+This is a fork done by Pandaloop which will use the [SceneryLuaJIT](https://github.com/pandaloop0/SceneryLuaJIT)
+when using the luajit and vendored feature.
+
+
 [![Build Status]][github-actions] [![Latest Version]][crates.io] [![API Documentation]][docs.rs] [![Coverage Status]][codecov.io] ![MSRV]
 
 [Build Status]: https://github.com/khvzak/mlua/workflows/CI/badge.svg
